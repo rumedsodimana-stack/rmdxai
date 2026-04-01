@@ -1,81 +1,73 @@
 import {
   IsString,
-  IsOptional,
   IsEmail,
+  IsOptional,
   IsDateString,
-  IsBoolean,
   IsNotEmpty,
+  MinLength,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreateGuestProfileDto {
-  @ApiProperty({ example: 'Jane' })
+  @ApiProperty({ description: "Guest's first name" })
   @IsString()
   @IsNotEmpty()
+  @MinLength(1)
   firstName: string;
 
-  @ApiProperty({ example: 'Doe' })
+  @ApiProperty({ description: "Guest's last name" })
   @IsString()
   @IsNotEmpty()
+  @MinLength(1)
   lastName: string;
 
-  @ApiPropertyOptional({ example: 'jane.doe@example.com' })
+  @ApiPropertyOptional({ description: "Guest's email address" })
   @IsOptional()
   @IsEmail()
   email?: string;
 
-  @ApiPropertyOptional({ example: '+1-555-000-1234' })
+  @ApiPropertyOptional({ description: "Guest's phone number (with country code)" })
   @IsOptional()
   @IsString()
   phone?: string;
 
-  @ApiPropertyOptional({ example: 'US' })
+  @ApiPropertyOptional({ description: 'Nationality (country code or name)' })
   @IsOptional()
   @IsString()
   nationality?: string;
 
-  @ApiPropertyOptional({ example: 'P12345678' })
+  @ApiPropertyOptional({ description: 'Passport number' })
   @IsOptional()
   @IsString()
   passportNo?: string;
 
-  @ApiPropertyOptional({ example: '2030-01-01' })
+  @ApiPropertyOptional({ description: 'Passport expiry date (ISO 8601)' })
   @IsOptional()
   @IsDateString()
-  passportExpiry?: string;
+  passportExpiry?: Date;
 
-  @ApiPropertyOptional({ example: '1985-06-15' })
+  @ApiPropertyOptional({ description: 'Date of birth (ISO 8601)' })
   @IsOptional()
   @IsDateString()
-  dateOfBirth?: string;
+  dateOfBirth?: Date;
 
-  @ApiPropertyOptional({ example: '123 Main St' })
+  @ApiPropertyOptional({ description: 'Street address' })
   @IsOptional()
   @IsString()
   address?: string;
 
-  @ApiPropertyOptional({ example: 'New York' })
+  @ApiPropertyOptional({ description: 'City of residence' })
   @IsOptional()
   @IsString()
   city?: string;
 
-  @ApiPropertyOptional({ example: 'US' })
+  @ApiPropertyOptional({ description: 'Country of residence' })
   @IsOptional()
   @IsString()
   country?: string;
 
-  @ApiPropertyOptional({ example: 'en', default: 'en' })
+  @ApiPropertyOptional({ description: 'Preferred communication language (ISO 639-1)', default: 'en' })
   @IsOptional()
   @IsString()
-  language?: string;
-
-  @ApiPropertyOptional({ example: false })
-  @IsOptional()
-  @IsBoolean()
-  isVip?: boolean;
-
-  @ApiPropertyOptional({ example: 'Corporate account — ACME Corp' })
-  @IsOptional()
-  @IsString()
-  vipReason?: string;
+  language?: string = 'en';
 }
