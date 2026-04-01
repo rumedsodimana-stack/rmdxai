@@ -23,17 +23,23 @@ async function bootstrap() {
   );
 
   // ── CORS ─────────────────────────────────────────────────────────────────
+  const frontendUrl = config.get('FRONTEND_URL', '');
   app.enableCors({
-    origin: nodeEnv === 'production' ? false : '*',
+    origin: [
+      'http://localhost:3000',
+      'https://*.vercel.app',
+      ...(frontendUrl ? [frontendUrl] : ['*']),
+    ],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
   });
 
   // ── API prefix ───────────────────────────────────────────────────────────
   app.setGlobalPrefix('api/v1');
 
   // ── Swagger ──────────────────────────────────────────────────────────────
-  if (nodeEnv !== 'production') {
+  if (true) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('Singularity PMS API')
       .setDescription(
@@ -78,8 +84,8 @@ async function bootstrap() {
     logger.log(`Swagger UI available at http://localhost:${port}/api/docs`);
   }
 
-  await app.listen(port);
-  logger.log(`Singularity PMS running on http://localhost:${port}/api/v1`);
+  await app.listen(port, '0.0.0.0');
+  logger.log(`Singularity PMS running on http://0.0.0.0:${port}/api/v1`);
   logger.log(`Environment: ${nodeEnv}`);
 }
 
