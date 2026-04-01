@@ -8,8 +8,8 @@ import {
   Param,
   Query,
   UseGuards,
-  HttpCode,
-  HttpStatus,
+  ParseIntPipe,
+  DefaultValuePipe,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -17,72 +17,79 @@ import {
   ApiOperation,
   ApiQuery,
 } from '@nestjs/swagger';
-
-import { CrmService } from './crm.service';
-import { CreateGuestProfileDto } from './dto/create-guest-profile.dto';
-import { UpdateGuestProfileDto } from './dto/update-guest-profile.dto';
-import { AddPreferenceDto } from './dto/add-preference.dto';
-
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { PropertyId } from '../../common/decorators/property-id.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { CrmService } from './crm.service';
+import { CreateGuestProfileDto } from './dto/create-guest-profile.dto';
+import { UpdateGuestProfileDto } from './dto/update-guest-profile.dto';
+import { CreateGuestNoteDto } from './dto/create-guest-note.dto';
+import { CreateGuestPreferenceDto } from './dto/create-guest-preference.dto';
+import { AdjustLoyaltyPointsDto } from './dto/adjust-loyalty-points.dto';
+import { BlacklistGuestDto } from './dto/blacklist-guest.dto';
+import { LoyaltyTier } from '@prisma/client';
 
-@ApiTags('crm')
+@ApiTags('CRM — Guest Profiles')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('crm')
 export class CrmController {
   constructor(private readonly crmService: CrmService) {}
 
-  // ─────────────────────────────────────────────────────────
-  //  GUEST PROFILES
-  // ─────────────────────────────────────────────────────────
+  // ─── Guest Profiles ───────────────────────────────────────────────
 
   @Post('guests')
-  @Roles('GM', 'ADMIN', 'DEPT_MANAGER', 'SUPERVISOR', 'STAFF')
   @ApiOperation({ summary: 'Create a new guest profile' })
-  createGuestProfile(@PropertyId() propertyId: string, @Body() dto: CreateGuestProfileDto) {
+  createGuestProfile(
+    @PropertyId() propertyId: string,
+    @Body() dto: CreateGuestProfileDto,
+  ) {
     return this.crmService.createGuestProfile(propertyId, dto);
   }
 
   @Get('guests')
-  @ApiOperation({ summary: 'List all guest profiles (paginated)' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
-  listGuestProfiles(
-    @PropertyId() propertyId: string,
-    @Query('page') page = '1',
-    @Query('limit') limit = '20',
-  ) {
-    const take = parseInt(limit, 10);
-    const skip = (parseInt(page, 10) - 1) * take;
-    return this.crmService.listGuestProfiles(propertyId, { skip, take });
-  }
-
-  @Get('guests/search')
-  @ApiOperation({ summary: 'Search guests by name, email, phone, or passport' })
-  @ApiQuery({ name: 'q', required: true, type: String })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiOperation({ summary: 'Search guest profiles' })
+  @ApiQuery({ name: 'name', required: false })
+  @ApiQuery({ name: 'email', required: false })
+  @ApiQuery({ name: 'phone', required: false })
+  @ApiQuery({ name: 'loyaltyTier', required: false, enum: LoyaltyTier })
+  @ApiQuery({ name: 'isVip', required: false, type: Boolean })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
   searchGuests(
     @PropertyId() propertyId: string,
-    @Query('q') query: string,
-    @Query('limit') limit = '20',
+    @Query('name') name?: string,
+    @Query('email') email?: string,
+    @Query('phone') phone?: string,
+    @Query('loyaltyTier') loyaltyTier?: LoyaltyTier,
+    @Query('isVip') isVip?: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page = 1,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit = 20,
   ) {
-    return this.crmService.searchGuests(propertyId, query, parseInt(limit, 10));
+    const skip = (page - 1) * limit;
+    const isVipBool = isVip === undefined ? undefined : isVip === 'true';
+    return this.crmService.searchGuestProfiles(propertyId, {
+      name,
+      email,
+      phone,
+      loyaltyTier,
+      isVip: isVipBool,
+      skip,
+      take: limit,
+    });
   }
 
   @Get('guests/:id')
-  @ApiOperation({ summary: 'Get a guest profile with preferences, notes, and recent stays' })
-  getGuestProfile(@PropertyId() propertyId: string, @Param('id') id: string) {
+  @ApiOperation({ summary: 'Get a guest profile with preferences, recent notes, and stay history' })
+  getGuest(@PropertyId() propertyId: string, @Param('id') id: string) {
     return this.crmService.getGuestProfile(propertyId, id);
   }
 
   @Patch('guests/:id')
-  @Roles('GM', 'ADMIN', 'DEPT_MANAGER', 'SUPERVISOR', 'STAFF')
   @ApiOperation({ summary: 'Update a guest profile' })
-  updateGuestProfile(
+  updateGuest(
     @PropertyId() propertyId: string,
     @Param('id') id: string,
     @Body() dto: UpdateGuestProfileDto,
@@ -90,166 +97,158 @@ export class CrmController {
     return this.crmService.updateGuestProfile(propertyId, id, dto);
   }
 
-  @Delete('guests/:id')
-  @Roles('GM', 'ADMIN')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Delete a guest profile (no active reservations)' })
-  deleteGuestProfile(@PropertyId() propertyId: string, @Param('id') id: string) {
-    return this.crmService.deleteGuestProfile(propertyId, id);
+  // ─── Notes ────────────────────────────────────────────────────────
+
+  @Post('guests/:id/notes')
+  @ApiOperation({ summary: 'Add a note to a guest profile' })
+  addNote(
+    @PropertyId() propertyId: string,
+    @Param('id') id: string,
+    @Body() dto: CreateGuestNoteDto,
+    @CurrentUser('sub') userId: string,
+  ) {
+    return this.crmService.addGuestNote(propertyId, id, dto, userId);
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  MERGE
-  // ─────────────────────────────────────────────────────────
+  @Get('guests/:id/notes')
+  @ApiOperation({ summary: 'List all notes for a guest profile' })
+  listNotes(@PropertyId() propertyId: string, @Param('id') id: string) {
+    return this.crmService.listGuestNotes(propertyId, id);
+  }
 
-  @Get('guests/:id/merge-candidates')
+  @Delete('guests/notes/:noteId')
   @Roles('GM', 'ADMIN', 'DEPT_MANAGER')
-  @ApiOperation({ summary: 'Find potential duplicate profiles for merging' })
-  findMergeCandidates(@PropertyId() propertyId: string, @Param('id') id: string) {
-    return this.crmService.findMergeCandidates(propertyId, id);
-  }
-
-  @Post('guests/:survivorId/merge/:duplicateId')
-  @Roles('GM', 'ADMIN')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Merge duplicate into survivor — reservations, points, notes all re-pointed' })
-  mergeGuestProfiles(
+  @ApiOperation({ summary: 'Delete a guest note (author or GM/Admin only)' })
+  deleteNote(
     @PropertyId() propertyId: string,
-    @Param('survivorId') survivorId: string,
-    @Param('duplicateId') duplicateId: string,
-    @CurrentUser() user: any,
+    @Param('noteId') noteId: string,
+    @CurrentUser('sub') userId: string,
   ) {
-    return this.crmService.mergeGuestProfiles(propertyId, survivorId, duplicateId, user.id);
+    return this.crmService.deleteGuestNote(propertyId, noteId, userId);
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  STAY HISTORY
-  // ─────────────────────────────────────────────────────────
-
-  @Get('guests/:id/stays')
-  @ApiOperation({ summary: 'Get stay history for a guest' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
-  getStayHistory(
-    @PropertyId() propertyId: string,
-    @Param('id') id: string,
-    @Query('page') page = '1',
-    @Query('limit') limit = '20',
-  ) {
-    const take = parseInt(limit, 10);
-    const skip = (parseInt(page, 10) - 1) * take;
-    return this.crmService.getStayHistory(propertyId, id, skip, take);
-  }
-
-  @Post('guests/:id/stays/record')
-  @Roles('GM', 'ADMIN', 'DEPT_MANAGER', 'FINANCE')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Record a completed stay and award loyalty points' })
-  recordStayAndUpdateLoyalty(
-    @PropertyId() propertyId: string,
-    @Param('id') id: string,
-    @Body('reservationId') reservationId: string,
-    @Body('pointsEarned') pointsEarned: number,
-    @CurrentUser() user: any,
-  ) {
-    return this.crmService.recordStayAndUpdateLoyalty(propertyId, id, reservationId, pointsEarned, user.id);
-  }
-
-  // ─────────────────────────────────────────────────────────
-  //  PREFERENCES
-  // ─────────────────────────────────────────────────────────
+  // ─── Preferences ──────────────────────────────────────────────────
 
   @Post('guests/:id/preferences')
-  @Roles('GM', 'ADMIN', 'DEPT_MANAGER', 'SUPERVISOR', 'STAFF')
-  @ApiOperation({ summary: 'Add a guest preference' })
+  @ApiOperation({ summary: 'Add a preference to a guest profile' })
   addPreference(
     @PropertyId() propertyId: string,
     @Param('id') id: string,
-    @Body() dto: AddPreferenceDto,
+    @Body() dto: CreateGuestPreferenceDto,
   ) {
     return this.crmService.addPreference(propertyId, id, dto);
   }
 
   @Get('guests/:id/preferences')
-  @ApiOperation({ summary: 'Get all preferences for a guest' })
-  getPreferences(@PropertyId() propertyId: string, @Param('id') id: string) {
-    return this.crmService.getPreferences(propertyId, id);
+  @ApiOperation({ summary: 'List preferences for a guest profile' })
+  listPreferences(@PropertyId() propertyId: string, @Param('id') id: string) {
+    return this.crmService.listPreferences(propertyId, id);
   }
 
-  @Delete('guests/:id/preferences/:preferenceId')
-  @Roles('GM', 'ADMIN', 'DEPT_MANAGER', 'SUPERVISOR')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Remove a guest preference' })
-  deletePreference(
+  @Delete('guests/preferences/:prefId')
+  @ApiOperation({ summary: 'Delete a guest preference' })
+  deletePreference(@PropertyId() propertyId: string, @Param('prefId') prefId: string) {
+    return this.crmService.deletePreference(propertyId, prefId);
+  }
+
+  // ─── Loyalty ──────────────────────────────────────────────────────
+
+  @Post('guests/:id/loyalty/adjust')
+  @Roles('GM', 'ADMIN', 'FINANCE')
+  @ApiOperation({ summary: 'Adjust loyalty points for a guest (earn, redeem, adjust, expire)' })
+  adjustLoyalty(
     @PropertyId() propertyId: string,
     @Param('id') id: string,
-    @Param('preferenceId') preferenceId: string,
+    @Body() dto: AdjustLoyaltyPointsDto,
   ) {
-    return this.crmService.deletePreference(propertyId, id, preferenceId);
+    return this.crmService.adjustLoyaltyPoints(propertyId, id, dto);
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  VIP
-  // ─────────────────────────────────────────────────────────
+  @Get('guests/:id/loyalty/history')
+  @ApiOperation({ summary: 'Get loyalty transaction history for a guest' })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  getLoyaltyHistory(
+    @PropertyId() propertyId: string,
+    @Param('id') id: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page = 1,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit = 20,
+  ) {
+    return this.crmService.getLoyaltyHistory(propertyId, id, (page - 1) * limit, limit);
+  }
+
+  // ─── VIP & Blacklist ──────────────────────────────────────────────
 
   @Patch('guests/:id/vip')
   @Roles('GM', 'ADMIN', 'DEPT_MANAGER')
-  @ApiOperation({ summary: 'Set or unset VIP flag for a guest' })
-  setVipFlag(
+  @ApiOperation({ summary: 'Set or remove VIP status for a guest' })
+  setVipStatus(
     @PropertyId() propertyId: string,
     @Param('id') id: string,
-    @Body('isVip') isVip: boolean,
-    @Body('reason') reason: string,
-    @CurrentUser() user: any,
+    @Body() body: { isVip: boolean; reason: string },
+    @CurrentUser('sub') userId: string,
   ) {
-    return this.crmService.setVipFlag(propertyId, id, isVip, reason, user.id);
+    return this.crmService.setVipStatus(propertyId, id, body.isVip, body.reason, userId);
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  NOTES
-  // ─────────────────────────────────────────────────────────
-
-  @Post('guests/:id/notes')
-  @Roles('GM', 'ADMIN', 'DEPT_MANAGER', 'SUPERVISOR', 'STAFF')
-  @ApiOperation({ summary: 'Add a note to a guest profile' })
-  addNote(
+  @Post('guests/:id/blacklist')
+  @Roles('GM', 'ADMIN')
+  @ApiOperation({
+    summary: 'Blacklist a guest — MANUAL ONLY. This action must NEVER be automated.',
+    description:
+      'HARD LIMIT: Guest blacklisting is a manual-only action that requires explicit authorisation from a GM or Admin. It must never be triggered automatically by any AI, rule engine, or system process.',
+  })
+  blacklistGuest(
     @PropertyId() propertyId: string,
     @Param('id') id: string,
-    @Body('content') content: string,
-    @Body('type') type: string,
-    @Body('isPrivate') isPrivate: boolean,
-    @CurrentUser() user: any,
+    @Body() dto: BlacklistGuestDto,
+    @CurrentUser('sub') userId: string,
   ) {
-    return this.crmService.addNote(propertyId, id, content, type, isPrivate, user.id);
+    // HARD LIMIT: Guest blacklisting is always manual — never automated by AI or system rules
+    return this.crmService.blacklistGuest(propertyId, id, dto, userId);
   }
 
-  @Get('guests/:id/notes')
-  @ApiOperation({ summary: 'Get notes for a guest profile' })
-  @ApiQuery({ name: 'includePrivate', required: false, type: Boolean })
-  getNotes(
+  @Post('guests/:id/unblacklist')
+  @Roles('GM', 'ADMIN')
+  @ApiOperation({ summary: 'Remove a guest from the blacklist' })
+  removeFromBlacklist(
     @PropertyId() propertyId: string,
     @Param('id') id: string,
-    @Query('includePrivate') includePrivate?: string,
+    @CurrentUser('sub') userId: string,
   ) {
-    return this.crmService.getNotes(propertyId, id, includePrivate === 'true');
+    return this.crmService.removeFromBlacklist(propertyId, id, userId);
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  LOYALTY
-  // ─────────────────────────────────────────────────────────
+  // ─── Stay History & Spend ─────────────────────────────────────────
 
-  @Get('guests/:id/loyalty')
-  @ApiOperation({ summary: 'Get loyalty transaction history for a guest' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
-  getLoyaltyTransactions(
+  @Get('guests/:id/stay-history')
+  @ApiOperation({ summary: 'Get stay history for a guest' })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  getStayHistory(
     @PropertyId() propertyId: string,
     @Param('id') id: string,
-    @Query('page') page = '1',
-    @Query('limit') limit = '20',
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page = 1,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit = 20,
   ) {
-    const take = parseInt(limit, 10);
-    const skip = (parseInt(page, 10) - 1) * take;
-    return this.crmService.getLoyaltyTransactions(propertyId, id, skip, take);
+    return this.crmService.getGuestStayHistory(propertyId, id, (page - 1) * limit, limit);
+  }
+
+  @Get('guests/:id/spend-summary')
+  @ApiOperation({ summary: 'Get spend summary for a guest across all folios and POS bills' })
+  getSpendSummary(@PropertyId() propertyId: string, @Param('id') id: string) {
+    return this.crmService.getGuestSpendSummary(propertyId, id);
+  }
+
+  // ─── Merge ────────────────────────────────────────────────────────
+
+  @Post('guests/merge')
+  @Roles('GM', 'ADMIN')
+  @ApiOperation({ summary: 'Merge a source guest profile into a target profile' })
+  mergeProfiles(
+    @PropertyId() propertyId: string,
+    @Body() body: { sourceId: string; targetId: string },
+  ) {
+    return this.crmService.mergeGuestProfiles(propertyId, body.sourceId, body.targetId);
   }
 }

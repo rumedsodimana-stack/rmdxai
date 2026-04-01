@@ -1,22 +1,32 @@
 import {
   Injectable,
   NotFoundException,
-  BadRequestException,
   ConflictException,
+  ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma.service';
-import { LoyaltyTier } from '@prisma/client';
 import { CreateGuestProfileDto } from './dto/create-guest-profile.dto';
 import { UpdateGuestProfileDto } from './dto/update-guest-profile.dto';
-import { AddPreferenceDto } from './dto/add-preference.dto';
+import { CreateGuestNoteDto } from './dto/create-guest-note.dto';
+import { CreateGuestPreferenceDto } from './dto/create-guest-preference.dto';
+import { AdjustLoyaltyPointsDto } from './dto/adjust-loyalty-points.dto';
+import { BlacklistGuestDto } from './dto/blacklist-guest.dto';
+import { LoyaltyTier } from '@prisma/client';
 
-// ─────────────────────────────────────────────────────────
-//  LOYALTY TIER THRESHOLDS
-// ─────────────────────────────────────────────────────────
-function deriveLoyaltyTier(totalStays: number): LoyaltyTier {
-  if (totalStays >= 50) return LoyaltyTier.PLATINUM;
-  if (totalStays >= 20) return LoyaltyTier.GOLD;
-  if (totalStays >= 5) return LoyaltyTier.SILVER;
+// Loyalty tier thresholds (points)
+const TIER_THRESHOLDS: { tier: LoyaltyTier; min: number }[] = [
+  { tier: LoyaltyTier.DIAMOND, min: 10000 },
+  { tier: LoyaltyTier.PLATINUM, min: 5000 },
+  { tier: LoyaltyTier.GOLD, min: 2000 },
+  { tier: LoyaltyTier.SILVER, min: 500 },
+  { tier: LoyaltyTier.BRONZE, min: 0 },
+];
+
+function resolveTier(points: number): LoyaltyTier {
+  for (const { tier, min } of TIER_THRESHOLDS) {
+    if (points >= min) return tier;
+  }
   return LoyaltyTier.BRONZE;
 }
 
@@ -24,30 +34,18 @@ function deriveLoyaltyTier(totalStays: number): LoyaltyTier {
 export class CrmService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // ─────────────────────────────────────────────────────────
-  //  GUEST PROFILES — CRUD
-  // ─────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────
+  //  Guest Profiles
+  // ─────────────────────────────────────────────────────────────────
 
   async createGuestProfile(propertyId: string, dto: CreateGuestProfileDto) {
-    // Duplicate detection: same email OR same passport within this property
     if (dto.email) {
-      const emailMatch = await this.prisma.guestProfile.findFirst({
+      const existing = await this.prisma.guestProfile.findFirst({
         where: { propertyId, email: dto.email },
       });
-      if (emailMatch) {
+      if (existing) {
         throw new ConflictException(
-          `A guest profile with email '${dto.email}' already exists (id: ${emailMatch.id}). Use merge if this is the same guest.`,
-        );
-      }
-    }
-
-    if (dto.passportNo) {
-      const passportMatch = await this.prisma.guestProfile.findFirst({
-        where: { propertyId, passportNo: dto.passportNo },
-      });
-      if (passportMatch) {
-        throw new ConflictException(
-          `A guest profile with passport '${dto.passportNo}' already exists (id: ${passportMatch.id}). Use merge if this is the same guest.`,
+          `A guest profile with email '${dto.email}' already exists for this property`,
         );
       }
     }
@@ -67,66 +65,114 @@ export class CrmService {
         city: dto.city,
         country: dto.country,
         language: dto.language ?? 'en',
-        isVip: dto.isVip ?? false,
-        vipReason: dto.isVip ? dto.vipReason : null,
+        loyaltyPoints: 0,
         loyaltyTier: LoyaltyTier.BRONZE,
+        totalStays: 0,
+        totalSpend: 0,
       },
     });
   }
 
-  async listGuestProfiles(
+  async searchGuestProfiles(
     propertyId: string,
-    params: { skip?: number; take?: number },
+    query: {
+      name?: string;
+      email?: string;
+      phone?: string;
+      loyaltyTier?: LoyaltyTier;
+      isVip?: boolean;
+      skip?: number;
+      take?: number;
+    },
   ) {
-    const { skip = 0, take = 20 } = params;
+    const { name, email, phone, loyaltyTier, isVip, skip = 0, take = 20 } = query;
 
-    const [guests, total] = await Promise.all([
+    const where: Parameters<typeof this.prisma.guestProfile.findMany>[0]['where'] = {
+      propertyId,
+      ...(loyaltyTier ? { loyaltyTier } : {}),
+      ...(isVip !== undefined ? { isVip } : {}),
+    };
+
+    if (name || email || phone) {
+      where.OR = [];
+      if (name) {
+        const nameParts = name.trim().split(/\s+/);
+        where.OR.push(
+          { firstName: { contains: name, mode: 'insensitive' } },
+          { lastName: { contains: name, mode: 'insensitive' } },
+        );
+        if (nameParts.length >= 2) {
+          where.OR.push({
+            AND: [
+              { firstName: { contains: nameParts[0], mode: 'insensitive' } },
+              { lastName: { contains: nameParts[nameParts.length - 1], mode: 'insensitive' } },
+            ],
+          });
+        }
+      }
+      if (email) where.OR.push({ email: { contains: email, mode: 'insensitive' } });
+      if (phone) where.OR.push({ phone: { contains: phone } });
+    }
+
+    const [items, total] = await Promise.all([
       this.prisma.guestProfile.findMany({
-        where: { propertyId },
-        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-        skip: Number(skip),
-        take: Number(take),
-        include: {
-          _count: { select: { reservations: true, preferences: true, guestNotes: true } },
-        },
+        where,
+        skip,
+        take,
+        orderBy: { createdAt: 'desc' },
       }),
-      this.prisma.guestProfile.count({ where: { propertyId } }),
+      this.prisma.guestProfile.count({ where }),
     ]);
 
-    return { guests, total, skip, take };
+    return { items, total, skip, take };
   }
 
   async getGuestProfile(propertyId: string, id: string) {
-    const guest = await this.prisma.guestProfile.findFirst({
+    const profile = await this.prisma.guestProfile.findFirst({
       where: { id, propertyId },
       include: {
-        preferences: { orderBy: { category: 'asc' } },
-        guestNotes: { orderBy: { createdAt: 'desc' }, take: 10 },
-        reservations: {
-          orderBy: { checkInDate: 'desc' },
-          take: 10,
-          include: { room: { include: { roomType: true } } },
+        preferences: { orderBy: { createdAt: 'desc' } },
+        guestNotes: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
         },
-        loyalty: { orderBy: { createdAt: 'desc' }, take: 10 },
+        reservations: {
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+          select: {
+            id: true,
+            confirmationNo: true,
+            status: true,
+            checkInDate: true,
+            checkOutDate: true,
+            rateAmount: true,
+            totalAmount: true,
+            source: true,
+            createdAt: true,
+          },
+        },
+        loyalty: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { balanceAfter: true },
+        },
       },
     });
-    if (!guest) throw new NotFoundException('Guest profile not found');
-    return guest;
+
+    if (!profile) throw new NotFoundException(`Guest profile ${id} not found`);
+    return profile;
   }
 
   async updateGuestProfile(propertyId: string, id: string, dto: UpdateGuestProfileDto) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${id} not found`);
 
-    // Guard against email collision on update
-    if (dto.email && dto.email !== guest.email) {
-      const collision = await this.prisma.guestProfile.findFirst({
-        where: { propertyId, email: dto.email, id: { not: id } },
+    if (dto.email && dto.email !== profile.email) {
+      const duplicate = await this.prisma.guestProfile.findFirst({
+        where: { propertyId, email: dto.email, NOT: { id } },
       });
-      if (collision) {
-        throw new ConflictException(
-          `Email '${dto.email}' belongs to another guest profile (id: ${collision.id})`,
-        );
+      if (duplicate) {
+        throw new ConflictException(`Email '${dto.email}' is already used by another guest profile`);
       }
     }
 
@@ -149,235 +195,134 @@ export class CrmService {
         ...(dto.city !== undefined && { city: dto.city }),
         ...(dto.country !== undefined && { country: dto.country }),
         ...(dto.language && { language: dto.language }),
+        ...(dto.isVip !== undefined && { isVip: dto.isVip }),
+        ...(dto.vipReason !== undefined && { vipReason: dto.vipReason }),
       },
     });
   }
 
-  async deleteGuestProfile(propertyId: string, id: string) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
-
-    // Cannot delete a profile with active or future reservations
-    const activeReservation = await this.prisma.reservation.findFirst({
-      where: {
-        guestProfileId: id,
-        status: { in: ['CONFIRMED', 'CHECKED_IN'] as any },
-      },
-    });
-    if (activeReservation) {
-      throw new BadRequestException(
-        'Cannot delete a guest profile with active or future reservations',
-      );
-    }
-
-    await this.prisma.guestProfile.delete({ where: { id } });
-    return { deleted: true, id };
-  }
-
-  // ─────────────────────────────────────────────────────────
-  //  SEARCH
-  // ─────────────────────────────────────────────────────────
-
-  async searchGuests(propertyId: string, query: string, take = 20) {
-    if (!query || query.trim().length < 2) {
-      throw new BadRequestException('Search query must be at least 2 characters');
-    }
-
-    const term = query.trim();
-
-    return this.prisma.guestProfile.findMany({
-      where: {
-        propertyId,
-        OR: [
-          { firstName: { contains: term, mode: 'insensitive' } },
-          { lastName: { contains: term, mode: 'insensitive' } },
-          { email: { contains: term, mode: 'insensitive' } },
-          { phone: { contains: term, mode: 'insensitive' } },
-          { passportNo: { contains: term, mode: 'insensitive' } },
-        ],
-      },
-      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-      take: Number(take),
-    });
-  }
-
-  // ─────────────────────────────────────────────────────────
-  //  MERGE DETECTION
-  // ─────────────────────────────────────────────────────────
-
-  async findMergeCandidates(propertyId: string, id: string) {
-    const source = await this.prisma.guestProfile.findFirst({ where: { id, propertyId } });
-    if (!source) throw new NotFoundException('Guest profile not found');
-
-    const candidates = await this.prisma.guestProfile.findMany({
-      where: {
-        propertyId,
-        id: { not: id },
-        OR: [
-          ...(source.email ? [{ email: source.email }] : []),
-          ...(source.phone ? [{ phone: source.phone }] : []),
-          ...(source.passportNo ? [{ passportNo: source.passportNo }] : []),
-          {
-            firstName: { equals: source.firstName, mode: 'insensitive' as any },
-            lastName: { equals: source.lastName, mode: 'insensitive' as any },
-          },
-        ],
-      },
-    });
-
-    return { source, candidates };
-  }
-
-  async mergeGuestProfiles(propertyId: string, survivorId: string, duplicateId: string, userId: string) {
-    if (survivorId === duplicateId) {
-      throw new BadRequestException('Cannot merge a profile with itself');
-    }
-
-    const [survivor, duplicate] = await Promise.all([
-      this.prisma.guestProfile.findFirst({ where: { id: survivorId, propertyId } }),
-      this.prisma.guestProfile.findFirst({ where: { id: duplicateId, propertyId } }),
+  async mergeGuestProfiles(propertyId: string, sourceId: string, targetId: string) {
+    const [source, target] = await Promise.all([
+      this.prisma.guestProfile.findFirst({ where: { id: sourceId, propertyId } }),
+      this.prisma.guestProfile.findFirst({ where: { id: targetId, propertyId } }),
     ]);
 
-    if (!survivor) throw new NotFoundException('Survivor guest profile not found');
-    if (!duplicate) throw new NotFoundException('Duplicate guest profile not found');
+    if (!source) throw new NotFoundException(`Source guest profile ${sourceId} not found`);
+    if (!target) throw new NotFoundException(`Target guest profile ${targetId} not found`);
+    if (sourceId === targetId) throw new BadRequestException('Source and target profiles must be different');
 
     return this.prisma.$transaction(async (tx) => {
-      // Re-point all reservations and folios to survivor
-      await tx.reservation.updateMany({
-        where: { guestProfileId: duplicateId },
-        data: { guestProfileId: survivorId },
-      });
-      await tx.folio.updateMany({
-        where: { guestProfileId: duplicateId },
-        data: { guestProfileId: survivorId },
-      });
+      // Re-assign reservations, preferences, notes to target
+      await Promise.all([
+        tx.reservation.updateMany({
+          where: { guestProfileId: sourceId },
+          data: { guestProfileId: targetId },
+        }),
+        tx.folio.updateMany({
+          where: { guestProfileId: sourceId },
+          data: { guestProfileId: targetId },
+        }),
+        tx.guestNote.updateMany({
+          where: { guestProfileId: sourceId },
+          data: { guestProfileId: targetId },
+        }),
+        tx.guestPreference.updateMany({
+          where: { guestProfileId: sourceId },
+          data: { guestProfileId: targetId },
+        }),
+        tx.loyaltyTransaction.updateMany({
+          where: { guestProfileId: sourceId },
+          data: { guestProfileId: targetId },
+        }),
+      ]);
 
-      // Carry over loyalty points and stay count
-      const totalStays = survivor.totalStays + duplicate.totalStays;
-      const totalSpend = Number(survivor.totalSpend) + Number(duplicate.totalSpend);
-      const loyaltyPoints = survivor.loyaltyPoints + duplicate.loyaltyPoints;
-      const newTier = deriveLoyaltyTier(totalStays);
-
-      const updatedSurvivor = await tx.guestProfile.update({
-        where: { id: survivorId },
+      // Merge totals into target
+      const updatedTarget = await tx.guestProfile.update({
+        where: { id: targetId },
         data: {
-          totalStays,
-          totalSpend,
-          loyaltyPoints,
-          loyaltyTier: newTier,
-          // Fill in missing fields from duplicate if survivor lacks them
-          email: survivor.email ?? duplicate.email,
-          phone: survivor.phone ?? duplicate.phone,
-          passportNo: survivor.passportNo ?? duplicate.passportNo,
-          nationality: survivor.nationality ?? duplicate.nationality,
-          notes: survivor.notes
-            ? `${survivor.notes} | Merged duplicate ${duplicateId} by ${userId}`
-            : `Merged duplicate ${duplicateId} by ${userId}`,
+          totalStays: target.totalStays + source.totalStays,
+          totalSpend: Number(target.totalSpend) + Number(source.totalSpend),
+          loyaltyPoints: target.loyaltyPoints + source.loyaltyPoints,
+          loyaltyTier: resolveTier(target.loyaltyPoints + source.loyaltyPoints),
         },
       });
 
-      // Move preferences
-      await tx.guestPreference.updateMany({
-        where: { guestProfileId: duplicateId },
-        data: { guestProfileId: survivorId },
-      });
+      // Delete source profile
+      await tx.guestProfile.delete({ where: { id: sourceId } });
 
-      // Move notes
-      await tx.guestNote.updateMany({
-        where: { guestProfileId: duplicateId },
-        data: { guestProfileId: survivorId },
-      });
-
-      // Delete duplicate
-      await tx.guestProfile.delete({ where: { id: duplicateId } });
-
-      return { survivor: updatedSurvivor, mergedFrom: duplicateId };
+      return { merged: true, targetProfile: updatedTarget };
     });
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  STAY HISTORY
-  // ─────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────
+  //  Guest Notes
+  // ─────────────────────────────────────────────────────────────────
 
-  async getStayHistory(propertyId: string, id: string, skip = 0, take = 20) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
-
-    const [reservations, total] = await Promise.all([
-      this.prisma.reservation.findMany({
-        where: { guestProfileId: id, propertyId },
-        orderBy: { checkInDate: 'desc' },
-        skip: Number(skip),
-        take: Number(take),
-        include: {
-          room: { include: { roomType: true } },
-          folio: { select: { totalCharges: true, totalPayments: true, balance: true, status: true } },
-        },
-      }),
-      this.prisma.reservation.count({ where: { guestProfileId: id, propertyId } }),
-    ]);
-
-    return { reservations, total, skip, take };
-  }
-
-  async recordStayAndUpdateLoyalty(
+  async addGuestNote(
     propertyId: string,
-    guestId: string,
-    reservationId: string,
-    pointsEarned: number,
-    userId: string,
+    guestProfileId: string,
+    dto: CreateGuestNoteDto,
+    authorId: string,
   ) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id: guestId, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
 
-    const reservation = await this.prisma.reservation.findFirst({
-      where: { id: reservationId, propertyId, guestProfileId: guestId },
-    });
-    if (!reservation) throw new NotFoundException('Reservation not found for this guest');
-
-    const newTotalStays = guest.totalStays + 1;
-    const newPoints = guest.loyaltyPoints + (pointsEarned ?? 0);
-    const newTier = deriveLoyaltyTier(newTotalStays);
-    const newSpend = Number(guest.totalSpend) + Number(reservation.totalAmount);
-
-    return this.prisma.$transaction(async (tx) => {
-      const updatedGuest = await tx.guestProfile.update({
-        where: { id: guestId },
-        data: {
-          totalStays: newTotalStays,
-          totalSpend: newSpend,
-          loyaltyPoints: newPoints,
-          loyaltyTier: newTier,
-        },
-      });
-
-      const loyaltyTx = await tx.loyaltyTransaction.create({
-        data: {
-          guestProfileId: guestId,
-          type: 'earn',
-          points: pointsEarned ?? 0,
-          balanceAfter: newPoints,
-          description: `Stay completed — reservation ${reservationId}`,
-          referenceType: 'reservation',
-          referenceId: reservationId,
-        },
-      });
-
-      return { guest: updatedGuest, loyaltyTransaction: loyaltyTx };
+    return this.prisma.guestNote.create({
+      data: {
+        guestProfileId,
+        authorId,
+        type: dto.type,
+        content: dto.content,
+        isPrivate: dto.isPrivate ?? false,
+      },
     });
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  PREFERENCES
-  // ─────────────────────────────────────────────────────────
+  async listGuestNotes(propertyId: string, guestProfileId: string) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
 
-  async addPreference(propertyId: string, guestId: string, dto: AddPreferenceDto) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id: guestId, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
+    return this.prisma.guestNote.findMany({
+      where: { guestProfileId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async deleteGuestNote(propertyId: string, noteId: string, userId: string) {
+    const note = await this.prisma.guestNote.findFirst({
+      where: { id: noteId },
+      include: { guestProfile: { select: { propertyId: true } } },
+    });
+
+    if (!note || note.guestProfile.propertyId !== propertyId) {
+      throw new NotFoundException(`Guest note ${noteId} not found`);
+    }
+
+    // Only the author can delete their own note (GMs can delete any via role guard)
+    if (note.authorId !== userId) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: userId, propertyId },
+        select: { role: true },
+      });
+      if (!user || !['ADMIN', 'GM'].includes(user.role)) {
+        throw new ForbiddenException('Only the note author or a GM/Admin can delete this note');
+      }
+    }
+
+    return this.prisma.guestNote.delete({ where: { id: noteId } });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  //  Guest Preferences
+  // ─────────────────────────────────────────────────────────────────
+
+  async addPreference(propertyId: string, guestProfileId: string, dto: CreateGuestPreferenceDto) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
 
     return this.prisma.guestPreference.create({
       data: {
-        guestProfileId: guestId,
+        guestProfileId,
         category: dto.category,
         preference: dto.preference,
         notes: dto.notes,
@@ -385,49 +330,115 @@ export class CrmService {
     });
   }
 
-  async getPreferences(propertyId: string, guestId: string) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id: guestId, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
+  async listPreferences(propertyId: string, guestProfileId: string) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
 
     return this.prisma.guestPreference.findMany({
-      where: { guestProfileId: guestId },
-      orderBy: [{ category: 'asc' }, { createdAt: 'asc' }],
+      where: { guestProfileId },
+      orderBy: { category: 'asc' },
     });
   }
 
-  async deletePreference(propertyId: string, guestId: string, preferenceId: string) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id: guestId, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
-
+  async deletePreference(propertyId: string, prefId: string) {
     const pref = await this.prisma.guestPreference.findFirst({
-      where: { id: preferenceId, guestProfileId: guestId },
+      where: { id: prefId },
+      include: { guestProfile: { select: { propertyId: true } } },
     });
-    if (!pref) throw new NotFoundException('Preference not found');
 
-    await this.prisma.guestPreference.delete({ where: { id: preferenceId } });
-    return { deleted: true, id: preferenceId };
-  }
-
-  // ─────────────────────────────────────────────────────────
-  //  VIP FLAG
-  // ─────────────────────────────────────────────────────────
-
-  async setVipFlag(
-    propertyId: string,
-    id: string,
-    isVip: boolean,
-    reason: string | undefined,
-    userId: string,
-  ) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
-
-    if (isVip && !reason) {
-      throw new BadRequestException('A reason is required when setting VIP status');
+    if (!pref || pref.guestProfile.propertyId !== propertyId) {
+      throw new NotFoundException(`Preference ${prefId} not found`);
     }
 
+    return this.prisma.guestPreference.delete({ where: { id: prefId } });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  //  Loyalty
+  // ─────────────────────────────────────────────────────────────────
+
+  async adjustLoyaltyPoints(
+    propertyId: string,
+    guestProfileId: string,
+    dto: AdjustLoyaltyPointsDto,
+  ) {
+    const profile = await this.prisma.guestProfile.findFirst({
+      where: { id: guestProfileId, propertyId },
+    });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
+
+    const newPoints = profile.loyaltyPoints + dto.points;
+    if (newPoints < 0) {
+      throw new BadRequestException(
+        `Insufficient loyalty points. Current: ${profile.loyaltyPoints}, Requested: ${Math.abs(dto.points)}`,
+      );
+    }
+
+    const newTier = resolveTier(newPoints);
+
+    return this.prisma.$transaction(async (tx) => {
+      const transaction = await tx.loyaltyTransaction.create({
+        data: {
+          guestProfileId,
+          type: dto.type,
+          points: dto.points,
+          balanceAfter: newPoints,
+          description: dto.description,
+          referenceType: dto.referenceType,
+          referenceId: dto.referenceId,
+        },
+      });
+
+      const updatedProfile = await tx.guestProfile.update({
+        where: { id: guestProfileId },
+        data: {
+          loyaltyPoints: newPoints,
+          loyaltyTier: newTier,
+        },
+      });
+
+      return { transaction, updatedProfile, newBalance: newPoints, newTier };
+    });
+  }
+
+  async getLoyaltyHistory(
+    propertyId: string,
+    guestProfileId: string,
+    skip = 0,
+    take = 20,
+  ) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
+
+    const [items, total] = await Promise.all([
+      this.prisma.loyaltyTransaction.findMany({
+        where: { guestProfileId },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take,
+      }),
+      this.prisma.loyaltyTransaction.count({ where: { guestProfileId } }),
+    ]);
+
+    return { items, total, skip, take, currentBalance: profile.loyaltyPoints };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  //  VIP & Blacklist
+  // ─────────────────────────────────────────────────────────────────
+
+  async setVipStatus(
+    propertyId: string,
+    guestProfileId: string,
+    isVip: boolean,
+    reason: string,
+    userId: string,
+  ) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
+
     return this.prisma.guestProfile.update({
-      where: { id },
+      where: { id: guestProfileId },
       data: {
         isVip,
         vipReason: isVip ? reason : null,
@@ -435,67 +446,176 @@ export class CrmService {
     });
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  NOTES
-  // ─────────────────────────────────────────────────────────
-
-  async addNote(
+  // HARD LIMIT — blacklist is MANUAL ONLY — no automation ever
+  async blacklistGuest(
     propertyId: string,
-    guestId: string,
-    content: string,
-    type: string,
-    isPrivate: boolean,
-    authorId: string,
+    guestProfileId: string,
+    dto: BlacklistGuestDto,
+    userId: string,
   ) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id: guestId, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
+    // HARD LIMIT: Guest blacklisting is always manual — never automated by AI or system rules
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
 
-    if (!content || content.trim().length === 0) {
-      throw new BadRequestException('Note content cannot be empty');
+    if (profile.isBlacklisted) {
+      throw new ConflictException('Guest is already blacklisted');
     }
 
-    return this.prisma.guestNote.create({
-      data: {
-        guestProfileId: guestId,
-        authorId,
-        type: type ?? 'general',
-        content: content.trim(),
-        isPrivate: isPrivate ?? false,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.guestProfile.update({
+        where: { id: guestProfileId },
+        data: {
+          isBlacklisted: true,
+          blacklistReason: dto.reason,
+          blacklistedAt: new Date(),
+          blacklistedById: userId,
+        },
+      });
+
+      // Create an audit note for the blacklisting
+      await tx.guestNote.create({
+        data: {
+          guestProfileId,
+          authorId: userId,
+          type: 'blacklist',
+          content: `Guest blacklisted. Reason: ${dto.reason}`,
+          isPrivate: true,
+        },
+      });
+
+      return updated;
     });
   }
 
-  async getNotes(propertyId: string, guestId: string, includePrivate = false) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id: guestId, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
+  async removeFromBlacklist(propertyId: string, guestProfileId: string, userId: string) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
 
-    return this.prisma.guestNote.findMany({
-      where: {
-        guestProfileId: guestId,
-        ...(includePrivate ? {} : { isPrivate: false }),
-      },
-      orderBy: { createdAt: 'desc' },
+    if (!profile.isBlacklisted) {
+      throw new ConflictException('Guest is not blacklisted');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.guestProfile.update({
+        where: { id: guestProfileId },
+        data: {
+          isBlacklisted: false,
+          blacklistReason: null,
+          blacklistedAt: null,
+          blacklistedById: null,
+        },
+      });
+
+      await tx.guestNote.create({
+        data: {
+          guestProfileId,
+          authorId: userId,
+          type: 'general',
+          content: `Guest removed from blacklist by user ${userId}`,
+          isPrivate: true,
+        },
+      });
+
+      return updated;
     });
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  LOYALTY TRANSACTIONS
-  // ─────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────
+  //  Stay History & Spend Summary
+  // ─────────────────────────────────────────────────────────────────
 
-  async getLoyaltyTransactions(propertyId: string, guestId: string, skip = 0, take = 20) {
-    const guest = await this.prisma.guestProfile.findFirst({ where: { id: guestId, propertyId } });
-    if (!guest) throw new NotFoundException('Guest profile not found');
+  async getGuestStayHistory(
+    propertyId: string,
+    guestProfileId: string,
+    skip = 0,
+    take = 20,
+  ) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
 
-    const [transactions, total] = await Promise.all([
-      this.prisma.loyaltyTransaction.findMany({
-        where: { guestProfileId: guestId },
-        orderBy: { createdAt: 'desc' },
-        skip: Number(skip),
-        take: Number(take),
+    const [items, total] = await Promise.all([
+      this.prisma.reservation.findMany({
+        where: { guestProfileId, propertyId },
+        orderBy: { checkInDate: 'desc' },
+        skip,
+        take,
+        select: {
+          id: true,
+          confirmationNo: true,
+          status: true,
+          checkInDate: true,
+          checkOutDate: true,
+          actualCheckIn: true,
+          actualCheckOut: true,
+          rateAmount: true,
+          totalAmount: true,
+          source: true,
+          adults: true,
+          children: true,
+          createdAt: true,
+        },
       }),
-      this.prisma.loyaltyTransaction.count({ where: { guestProfileId: guestId } }),
+      this.prisma.reservation.count({ where: { guestProfileId, propertyId } }),
     ]);
 
-    return { transactions, total, skip, take };
+    return { items, total, skip, take };
+  }
+
+  async getGuestSpendSummary(propertyId: string, guestProfileId: string) {
+    const profile = await this.prisma.guestProfile.findFirst({ where: { id: guestProfileId, propertyId } });
+    if (!profile) throw new NotFoundException(`Guest profile ${guestProfileId} not found`);
+
+    // Sum folio items for this guest
+    const folios = await this.prisma.folio.findMany({
+      where: { guestProfileId, propertyId },
+      include: {
+        items: {
+          where: { isVoid: false },
+          select: { description: true, amount: true, referenceType: true },
+        },
+      },
+    });
+
+    let roomCharges = 0;
+    let fbCharges = 0;
+    let otherCharges = 0;
+    let totalFolioCharges = 0;
+
+    for (const folio of folios) {
+      for (const item of folio.items) {
+        const amount = Number(item.amount);
+        totalFolioCharges += amount;
+        if (item.referenceType === 'room_charge') roomCharges += amount;
+        else if (item.referenceType === 'pos_charge' || item.referenceType === 'fb') fbCharges += amount;
+        else otherCharges += amount;
+      }
+    }
+
+    // Sum POS bills for this guest
+    const bills = await this.prisma.bill.findMany({
+      where: {
+        propertyId,
+        order: { guestProfileId },
+        status: { not: 'VOID' },
+      },
+      select: { total: true },
+    });
+
+    const totalPosBills = bills.reduce((sum, b) => sum + Number(b.total), 0);
+
+    return {
+      guestProfileId,
+      loyaltyPoints: profile.loyaltyPoints,
+      loyaltyTier: profile.loyaltyTier,
+      totalStays: profile.totalStays,
+      totalSpend: Number(profile.totalSpend),
+      breakdown: {
+        roomCharges: Math.round(roomCharges * 100) / 100,
+        fbCharges: Math.round(fbCharges * 100) / 100,
+        otherFolioCharges: Math.round(otherCharges * 100) / 100,
+        posBills: Math.round(totalPosBills * 100) / 100,
+        totalFolioCharges: Math.round(totalFolioCharges * 100) / 100,
+      },
+    };
   }
 }
