@@ -1,9 +1,9 @@
 import {
   IsString,
-  IsNotEmpty,
-  IsEnum,
-  IsNumber,
   IsOptional,
+  IsNumber,
+  IsEnum,
+  IsNotEmpty,
   Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -11,27 +11,27 @@ import { Type } from 'class-transformer';
 import { PaymentMethod } from '@prisma/client';
 
 export class CreateReceiptDto {
-  @ApiPropertyOptional({ description: 'Invoice ID to apply this receipt against' })
+  @ApiPropertyOptional({ description: 'Invoice ID this receipt applies against' })
   @IsOptional()
   @IsString()
   invoiceId?: string;
 
-  @ApiProperty({ example: 1344.00, description: 'Amount received' })
+  @ApiProperty({ description: 'Amount received' })
   @IsNumber()
   @Min(0.01)
   @Type(() => Number)
   amount: number;
 
-  @ApiProperty({ enum: PaymentMethod })
+  @ApiProperty({ enum: PaymentMethod, description: 'Method of payment' })
   @IsEnum(PaymentMethod)
   paymentMethod: PaymentMethod;
 
-  @ApiPropertyOptional({ example: 'TXN-8765432', description: 'Payment reference / transaction ID' })
+  @ApiPropertyOptional({ description: 'Payment reference (e.g. transaction ID, cheque number)' })
   @IsOptional()
   @IsString()
   reference?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Additional notes' })
   @IsOptional()
   @IsString()
   notes?: string;

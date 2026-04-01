@@ -1,12 +1,13 @@
 import {
   IsString,
-  IsNotEmpty,
+  IsOptional,
   IsDateString,
   IsArray,
   ValidateNested,
-  IsEnum,
   IsNumber,
-  IsOptional,
+  IsEnum,
+  IsNotEmpty,
+  ArrayMinSize,
   Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -14,49 +15,54 @@ import { Type } from 'class-transformer';
 import { JournalEntryType } from '@prisma/client';
 
 export class JournalLineDto {
-  @ApiProperty({ description: 'Chart of account ID' })
+  @ApiProperty({ description: 'Account ID to post this line to' })
   @IsString()
   @IsNotEmpty()
   accountId: string;
 
-  @ApiProperty({ enum: JournalEntryType, description: 'DEBIT or CREDIT' })
+  @ApiProperty({ enum: JournalEntryType, description: 'Debit or Credit' })
   @IsEnum(JournalEntryType)
   type: JournalEntryType;
 
-  @ApiProperty({ example: 1500.00 })
+  @ApiProperty({ description: 'Amount (must be positive)' })
   @IsNumber()
   @Min(0.01)
   @Type(() => Number)
   amount: number;
 
-  @ApiPropertyOptional({ example: 'Room revenue accrual' })
+  @ApiPropertyOptional({ description: 'Line-level description' })
   @IsOptional()
   @IsString()
   description?: string;
 }
 
 export class CreateJournalEntryDto {
-  @ApiProperty({ example: 'Room revenue for September 2025' })
+  @ApiProperty({ description: 'Entry description' })
   @IsString()
   @IsNotEmpty()
   description: string;
 
-  @ApiPropertyOptional({ example: 'folio', description: 'Source entity type' })
+  @ApiPropertyOptional({ description: 'Entity type this entry relates to (e.g. folio, invoice, payroll)' })
   @IsOptional()
   @IsString()
   referenceType?: string;
 
-  @ApiPropertyOptional({ example: 'abc-123', description: 'Source entity ID' })
+  @ApiPropertyOptional({ description: 'ID of the referenced entity' })
   @IsOptional()
   @IsString()
   referenceId?: string;
 
-  @ApiProperty({ example: '2025-09-30', description: 'Accounting date for this entry' })
+  @ApiProperty({ description: 'Accounting date of the entry (ISO 8601)' })
   @IsDateString()
-  entryDate: string;
+  entryDate: Date;
 
-  @ApiProperty({ type: [JournalLineDto], description: 'Debit and credit lines (must balance)' })
+  @ApiProperty({
+    type: [JournalLineDto],
+    description:
+      'Journal lines — total debits must equal total credits (double-entry accounting)',
+  })
   @IsArray()
+  @ArrayMinSize(2)
   @ValidateNested({ each: true })
   @Type(() => JournalLineDto)
   lines: JournalLineDto[];

@@ -1,42 +1,48 @@
 import {
   IsString,
-  IsNotEmpty,
+  IsOptional,
   IsDateString,
   IsNumber,
-  IsOptional,
+  IsNotEmpty,
   Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
 export class CreateInvoiceDto {
-  @ApiPropertyOptional({ description: 'Guest profile ID (individual billing)' })
+  @ApiPropertyOptional({ description: 'Guest profile ID to associate with this invoice' })
   @IsOptional()
   @IsString()
   guestProfileId?: string;
 
-  @ApiPropertyOptional({ description: 'Company name (corporate billing)' })
+  @ApiPropertyOptional({ description: 'Company name for corporate invoices' })
   @IsOptional()
   @IsString()
   companyName?: string;
 
-  @ApiProperty({ example: '2025-10-15', description: 'Invoice due date' })
+  @ApiProperty({ description: 'Invoice due date (ISO 8601)' })
   @IsDateString()
-  dueDate: string;
+  dueDate: Date;
 
-  @ApiProperty({ example: 1200.00, description: 'Subtotal before tax' })
+  @ApiProperty({ description: 'Subtotal before tax' })
   @IsNumber()
   @Min(0)
   @Type(() => Number)
   subtotal: number;
 
-  @ApiProperty({ example: 144.00, description: 'Tax amount' })
+  @ApiProperty({ description: 'Tax amount' })
   @IsNumber()
   @Min(0)
   @Type(() => Number)
   taxAmount: number;
 
-  @ApiPropertyOptional({ example: 'Corporate stay — ACME Corp, September 2025' })
+  @ApiProperty({ description: 'Total (subtotal + taxAmount)' })
+  @IsNumber()
+  @Min(0)
+  @Type(() => Number)
+  total: number;
+
+  @ApiPropertyOptional({ description: 'Additional notes for the invoice' })
   @IsOptional()
   @IsString()
   notes?: string;
